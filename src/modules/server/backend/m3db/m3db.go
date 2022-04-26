@@ -100,6 +100,7 @@ func (p *Client) Push2Queue(items []*dataobj.MetricValue) {
 	var (
 		wg sync.WaitGroup
 	)
+	stats.Counter.Set("m3db.queue.count", len(items))
 	for _, item := range items {
 		wg.Add(1)
 		go func(dm *dataobj.MetricValue) {
@@ -141,6 +142,7 @@ func (p *Client) QueryData(inputs []dataobj.QueryData) []*dataobj.TsdbQueryRespo
 	if len(inputs) == 0 {
 		return nil
 	}
+	stats.Counter.Set("m3db.query.count", len(inputs))
 
 	query, opts := p.config.queryDataOptions(inputs)
 	ret, err := fetchTagged(session, p.namespaceID, query, opts)
@@ -449,7 +451,7 @@ func completeTags(
 	query index.Query,
 	opts index.AggregationOptions,
 ) (*consolidators.CompleteTagsResult, error) {
-	aggTagIter, metadata, err := session.Aggregate(namespace, query, opts)
+	aggTagIter, metadata, err := m3dbAggregateProxy(session, namespace, query, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -478,6 +480,24 @@ func completeTags(
 		CompletedTags:    completedTags,
 		Metadata:         blockMeta,
 	}, nil
+}
+
+func m3dbAggregateProxy(
+	session client.Session,
+	namespace ident.ID,
+	query index.Query,
+	opts index.AggregationOptions,
+	) (client.AggregatedTagsIterator, client.FetchResponseMetadata, error) {
+	tagIdIter, metadata, err := session.FetchTaggedIDs(namespace, query, opts.QueryOptions)
+	accelAggregateTagsIterator := newAggregateTagsIterator()
+	for tagIdIter.Next() {
+		_, _, tagsIter := tagIdIter.Current()
+		for tagsIter.Next() {
+			tag := tagsIter.Current()
+			accelAggregateTagsIterator.addTag(tag)
+		}
+	}
+	return accelAggregateTagsIterator, metadata, err
 }
 
 func seriesIterWalk(iter encoding.SeriesIterator) (out *dataobj.TsdbQueryResponse, err error) {
